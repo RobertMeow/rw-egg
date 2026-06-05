@@ -1,0 +1,21 @@
+[package]
+name = "remnanode-mux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+axum.workspace = true
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http = "1"
+tower.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+
+remnanode-config.workspace = true
+remnanode-server.workspace = true

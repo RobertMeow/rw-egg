@@ -1,0 +1,81 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/remnanode-bin",
+    "crates/remnanode-server",
+    "crates/remnanode-xray",
+    "crates/remnanode-config",
+    "crates/remnanode-mux",
+    "crates/remnanode-plugins",
+    "crates/remnanode-proto",
+]
+
+[workspace.package]
+version = "2.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "signal", "sync", "time", "fs"] }
+
+# HTTP
+axum = { version = "0.8", features = ["json"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+http-body-util = "0.1"
+
+# gRPC
+tonic = { version = "0.13", features = ["tls-ring"] }
+prost = "0.13"
+tonic-build = "0.13"
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+
+# JWT
+jsonwebtoken = "9"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Cert generation
+rcgen = "0.13"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+thiserror = "2"
+bytes = "1"
+md-5 = "0.10"
+dotenvy = "0.15"
+rand = "0.9"
+hex = "0.4"
+
+# Binary deps
+libc = "0.2"
+zip = "2"
+zstd = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Internal crate deps
+remnanode-server = { path = "crates/remnanode-server" }
+remnanode-xray = { path = "crates/remnanode-xray" }
+remnanode-config = { path = "crates/remnanode-config" }
+remnanode-mux = { path = "crates/remnanode-mux" }
+remnanode-plugins = { path = "crates/remnanode-plugins" }
+remnanode-proto = { path = "crates/remnanode-proto" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"
+panic = "abort"

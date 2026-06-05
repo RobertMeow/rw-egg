@@ -1,0 +1,23 @@
+[package]
+name = "remnanode-xray"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+rand.workspace = true
+hyper.workspace = true
+http-body-util.workspace = true
+
+remnanode-config.workspace = true
+remnanode-proto.workspace = true
+libc.workspace = true
+zip.workspace = true
+reqwest.workspace = true

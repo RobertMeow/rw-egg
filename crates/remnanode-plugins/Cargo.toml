@@ -1,0 +1,13 @@
+[package]
+name = "remnanode-plugins"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+md-5.workspace = true
+hex.workspace = true
+chrono = "0.4"

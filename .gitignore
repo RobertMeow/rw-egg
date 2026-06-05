@@ -1,0 +1,22 @@
+# Rust
+target/
+
+# Pre-built binary (rebuilt via Docker, uploaded via SFTP)
+deploy/remnanode-bin
+
+# Environment & secrets
+.env
+.env.*
+!.env.sample
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.sublime-workspace
+
+# Claude Code
+.claude/
