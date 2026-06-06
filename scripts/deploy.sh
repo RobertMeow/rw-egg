@@ -24,8 +24,8 @@ echo "=== Binary info ==="
 file "$PROJECT_DIR"/target/remnanode-x86
 ls -lh "$PROJECT_DIR"/target/remnanode-x86
 
-ARCH=$(file "$PROJECT_DIR"/target/remnanode-x86 | grep -o "x86-64\|x86_64" || echo "")
-if [ "$ARCH" != "x86-64" ]; then
+ARCH=$(file "$PROJECT_DIR"/target/remnanode-x86 | grep -oE "x86-64|x86_64" || echo "")
+if [ -z "$ARCH" ]; then
     echo "ERROR: Binary is not x86-64! Got: $(file "$PROJECT_DIR"/target/remnanode-x86)"
     exit 1
 fi
