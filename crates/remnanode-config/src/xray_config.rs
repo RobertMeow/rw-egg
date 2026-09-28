@@ -35,6 +35,15 @@ pub fn generate_api_config(
                 if obj.get("tag").and_then(|v| v.as_str()) != Some("REMNAWAVE_API_INBOUND") {
                     obj.insert("listen".to_string(), serde_json::json!("127.0.0.1"));
                     obj.insert("port".to_string(), serde_json::json!(xray_proxy_port));
+                    // Мультиплексор шлёт PROXY-заголовок с реальным IP клиента,
+                    // иначе xray видит всех как 127.0.0.1 (сессии/лимиты IP ломаются).
+                    let stream = obj.entry("streamSettings").or_insert_with(|| serde_json::json!({}));
+                    if let Some(stream) = stream.as_object_mut() {
+                        let sockopt = stream.entry("sockopt").or_insert_with(|| serde_json::json!({}));
+                        if let Some(sockopt) = sockopt.as_object_mut() {
+                            sockopt.insert("acceptProxyProtocol".to_string(), serde_json::json!(true));
+                        }
+                    }
                 }
             }
             inbounds.push(inbound);
@@ -53,7 +62,7 @@ pub fn generate_api_config(
             "0": {
                 "statsUserUplink": true,
                 "statsUserDownlink": true,
-                "statsUserOnline": false  // no CAP_NET_ADMIN
+                "statsUserOnline": true
             }
         },
         "system": {

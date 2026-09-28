@@ -83,6 +83,9 @@ pub async fn start(
         let mut xray = state.xray.write().await;
         xray.extract_users_from_config(&hashes, &full_config);
         xray.config = Some(full_config);
+        // Полный конфиг от панели уже содержит всех юзеров
+        xray.journal.clear();
+        xray.journal_overflow = false;
     }
 
     {
@@ -167,31 +170,14 @@ pub async fn start(
     Json(serde_json::json!({
         "response": {
             "isStarted": true,
-            "version": std::env::var("XRAY_CORE_VERSION").ok(),
+            "version": xray_version(),
             "error": null,
             "nodeInformation": {
-                "version": std::env::var("XRAY_CORE_VERSION").ok()
+                "version": NODE_VERSION
             },
             "system": {
-                "info": {
-                    "arch": std::env::consts::ARCH,
-                    "cpus": num_cpus::get(),
-                    "cpuModel": "",
-                    "memoryTotal": 0,
-                    "hostname": "",
-                    "platform": std::env::consts::OS,
-                    "release": "",
-                    "type": "",
-                    "version": "",
-                    "networkInterfaces": []
-                },
-                "stats": {
-                    "memoryFree": 0,
-                    "memoryUsed": 0,
-                    "uptime": 0,
-                    "loadAvg": [0.0, 0.0, 0.0],
-                    "interface": null
-                }
+                "info": crate::handlers::stats::system_info(),
+                "stats": crate::handlers::stats::read_system_stats()
             }
         }
     }))
@@ -236,8 +222,36 @@ pub async fn healthcheck(State(state): State<AppState>) -> Json<serde_json::Valu
         "response": {
             "isAlive": true,
             "xrayInternalStatusCached": grpc_ok,
-            "xrayVersion": std::env::var("XRAY_CORE_VERSION").ok(),
-            "nodeVersion": "2.7.0"
+            "xrayVersion": xray_version(),
+            "nodeVersion": NODE_VERSION
         }
     }))
+}
+
+/// Версия ноды для панели. Без суффиксов: панель сравнивает по semver (>= 2.7.0),
+/// а «2.7.0-rs» считается пре-релизом и отклоняется как устаревшая.
+const NODE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Версия Xray без «v»: из `rw-core version` («Xray 26.3.27 (...)»), иначе из XRAY_CORE_VERSION.
+fn xray_version() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::process::Command::new("/home/container/runtime/bin/rw-core")
+                .arg("version")
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .split_whitespace()
+                        .nth(1)
+                        .map(|v| v.trim_start_matches('v').to_string())
+                })
+                .or_else(|| {
+                    std::env::var("XRAY_CORE_VERSION")
+                        .ok()
+                        .map(|v| v.trim_start_matches('v').to_string())
+                })
+        })
+        .clone()
 }
