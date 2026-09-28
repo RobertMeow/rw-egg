@@ -1,4 +1,4 @@
-use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
+use tonic::transport::Channel;
 use remnanode_proto::xray::app::router::command::routing_service_client::RoutingServiceClient;
 use remnanode_proto::xray::common::serial::TypedMessage;
 
@@ -9,17 +9,11 @@ pub struct RouterClient {
 impl RouterClient {
     pub async fn connect(
         addr: &str,
-        ca_cert: &[u8],
-        client_cert: &[u8],
-        client_key: &[u8],
+        _ca_cert: &[u8],
+        _client_cert: &[u8],
+        _client_key: &[u8],
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let tls = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(ca_cert))
-            .identity(Identity::from_pem(client_cert, client_key))
-            .domain_name("internal.remnawave.local");
-
         let channel = Channel::from_shared(format!("http://{addr}"))?
-            .tls_config(tls)?
             .connect()
             .await?;
 

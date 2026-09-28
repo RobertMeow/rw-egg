@@ -10,14 +10,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=== Building remnanode-rs (x86_64) ==="
-docker build -t remnanode-rs:x86 -f Dockerfile "$PROJECT_DIR"
+docker build --platform linux/amd64 -t remnanode-rs:x86 -f Dockerfile "$PROJECT_DIR"
 
 echo ""
 echo "=== Extracting binary ==="
 mkdir -p "$PROJECT_DIR"/target
-docker create --name remnanode-deploy remnanode-rs:x86 2>/dev/null || true
+docker rm -f remnanode-deploy >/dev/null 2>&1 || true
+docker create --platform linux/amd64 --name remnanode-deploy remnanode-rs:x86
 docker cp remnanode-deploy:/build/target/release/remnanode "$PROJECT_DIR"/target/remnanode-x86
-docker rm remnanode-deploy
+docker rm -f remnanode-deploy
 
 echo ""
 echo "=== Binary info ==="

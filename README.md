@@ -40,6 +40,7 @@ Builds in Docker, extracts binary, uploads via SFTP to the Pterodactyl node. The
 | `SECRET_KEY` | Yes | Base64 JSON with mTLS certs + JWT public key |
 | `API_DOMAIN` | Yes | Panel API domain for TLS |
 | `XRAY_PROXY_PORT` | No | Internal xray listen port (default: `61001`) |
+| `CF_TOKEN` | Only for Hysteria2 | Cloudflare API token for acme.sh DNS-01 (Let's Encrypt cert for the Hysteria inbound) |
 
 ## Pterodactyl Setup
 

@@ -1,6 +1,58 @@
 use axum::{extract::State, response::Json, body::Bytes};
 use crate::state::AppState;
-use std::time::Duration;
+
+/// Normalize an xray version string to a plain semver like "26.3.27",
+/// matching upstream's `semver.valid(semver.coerce(...))` behaviour.
+fn normalize_xray_version(raw: &str) -> Option<String> {
+    // Strip optional leading 'v'/'V' and take the first dotted numeric sequence.
+    let stripped = raw.trim_start_matches(['v', 'V']);
+    let mut result = String::new();
+    let mut prev_was_digit = false;
+    for ch in stripped.chars() {
+        if ch.is_ascii_digit() {
+            result.push(ch);
+            prev_was_digit = true;
+        } else if ch == '.' && prev_was_digit {
+            result.push(ch);
+            prev_was_digit = false;
+        } else if !result.is_empty() {
+            break;
+        }
+    }
+
+    if result.is_empty() || result.ends_with('.') {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn xray_version(env: &remnanode_config::EnvConfig) -> Option<String> {
+    normalize_xray_version(&env.xray_core_version)
+}
+
+/// If `panel_config` has a Hysteria inbound, make sure a Let's Encrypt cert
+/// is on disk for it before xray starts. A failure here is logged and
+/// swallowed rather than aborting the start — xray will simply fail to bind
+/// the Hysteria inbound and the panel/logs will surface that, same as any
+/// other misconfiguration.
+async fn ensure_hysteria_cert(env: &remnanode_config::EnvConfig, panel_config: &serde_json::Value) {
+    let Some(domain) = remnanode_config::acme::find_hysteria_domain(panel_config) else {
+        return;
+    };
+
+    let Some(cf_token) = env.cf_token.as_deref() else {
+        tracing::warn!(
+            "Panel config has a Hysteria inbound for {domain} but CF_TOKEN is not set; \
+             its TLS certificate cannot be issued"
+        );
+        return;
+    };
+
+    if let Err(e) = remnanode_config::acme::ensure_cert(&domain, cf_token).await {
+        tracing::error!("Failed to ensure Hysteria certificate for {domain}: {e}");
+    }
+}
 
 fn parse_body(body: &Bytes) -> serde_json::Value {
     if body.is_empty() {
@@ -60,11 +112,14 @@ pub async fn start(
 
     tracing::info!("Xray start: torrent_blocker={is_torrent_blocker_enabled}, force_restart={force_restart}");
 
+    ensure_hysteria_cert(&state.env, &xray_config).await;
+
     let mtls = state.mtls_certs.clone();
     let full_config = remnanode_config::xray_config::generate_api_config(
         &xray_config,
         state.env.xtls_api_port,
         state.env.xray_proxy_port,
+        state.env.node_port,
         &mtls,
         is_torrent_blocker_enabled,
         &torrent_include_tags,
@@ -79,146 +134,217 @@ pub async fn start(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
+    // Decide whether a full restart is required. If xray is already online and
+    // the configuration hashes have not changed, we can skip the restart to avoid
+    // dropping active connections.
+    let should_restart = {
+        let mut xray = state.xray.write().await;
+
+        if force_restart {
+            tracing::warn!("Force restart requested");
+            true
+        } else if xray.process.is_none() || xray.stats_client.is_none() {
+            tracing::info!("Xray is not online - restart required");
+            true
+        } else {
+            // Check gRPC health and compare hashes.
+            let grpc_healthy = match xray.stats_client.as_mut() {
+                Some(client) => client.get_sys_stats().await.is_ok(),
+                None => false,
+            };
+
+            if !grpc_healthy {
+                tracing::warn!("Xray Core health check failed, restarting...");
+                true
+            } else {
+                xray.is_need_restart_core(&hashes)
+            }
+        }
+    };
+
+    if !should_restart {
+        tracing::info!("Xray Core configuration is up-to-date - no restart required");
+        let system = crate::system_stats::collect_system_snapshot();
+        return Json(serde_json::json!({
+            "response": {
+                "isStarted": true,
+                "version": xray_version(&state.env),
+                "error": null,
+                "nodeInformation": {
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "system": system
+            }
+        }));
+    }
+
+    // Persist panel state so we can recover after a Pterodactyl restart.
+    let persisted = remnanode_config::persistence::PersistedNodeState {
+        panel_config: xray_config.clone(),
+        torrent_blocker_state: body.get("torrentBlockerState").cloned().unwrap_or(serde_json::json!({})),
+        hashes: hashes.clone(),
+        saved_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = persisted.save().await {
+        tracing::error!("Failed to persist node state: {e}");
+    }
+
     {
         let mut xray = state.xray.write().await;
         xray.extract_users_from_config(&hashes, &full_config);
         xray.config = Some(full_config);
     }
 
-    {
-        let mut xray = state.xray.write().await;
-
-        if let Some(ref mut child) = xray.process {
-            tracing::info!("Stopping existing xray process");
-            let _ = crate::xray_process::stop_xray(child).await;
-            xray.process = None;
-        }
-
-        match crate::xray_process::start_xray(
-            &state.internal.socket_path,
-            &state.internal.token,
-        ).await {
-            Ok(child) => {
-                let pid = child.id();
-                tracing::info!("Xray process started (PID {pid:?})");
-                xray.process = Some(child);
-            }
-            Err(e) => {
-                tracing::error!("Failed to start xray: {e}");
-                return Json(serde_json::json!({
-                    "response": { "message": e }
-                }));
-            }
-        }
-    }
-
-    // gRPC retry loop — acquire/release write lock per iteration
-    // to avoid deadlock: xray needs read lock to fetch config from internal server
-    for attempt in 0..20 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = {
-            let mut xray = state.xray.write().await;
-
-            // Check if xray process is still alive
-            if let Some(ref mut child) = xray.process {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        tracing::error!("Xray process exited prematurely: {status}");
-                        xray.process = None;
-                        return Json(serde_json::json!({
-                            "response": { "message": format!("Xray exited: {status}") }
-                        }));
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!("Failed to check xray status: {e}");
-                    }
-                }
-            } else {
-                tracing::error!("Xray process lost");
-                return Json(serde_json::json!({
-                    "response": { "message": "Xray process lost" }
-                }));
-            }
-
-            xray.connect_grpc(state.env.xtls_api_port, &state.mtls_certs).await
-        };
-        // write lock released here — internal server can serve config
-
-        match result {
-            Ok(_) => {
-                tracing::info!("gRPC connected after {} attempts", attempt + 1);
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("gRPC attempt {}/20 failed: {e}", attempt + 1);
-                if attempt == 19 {
-                    tracing::error!("gRPC connection failed after 20 attempts");
-                    return Json(serde_json::json!({
-                        "response": { "message": format!("gRPC connection failed: {e}") }
-                    }));
-                }
-            }
-        }
+    if let Err(e) = remnanode_xray::XrayState::start_and_connect(
+        state.xray.clone(),
+        &state.internal.socket_path,
+        &state.internal.token,
+        state.env.xtls_api_port,
+        state.mtls_certs.clone(),
+    ).await {
+        return Json(serde_json::json!({
+            "response": { "message": e }
+        }));
     }
 
     tracing::info!("Xray started successfully");
+
+    let system = crate::system_stats::collect_system_snapshot();
+
     Json(serde_json::json!({
         "response": {
             "isStarted": true,
-            "version": std::env::var("XRAY_CORE_VERSION").ok(),
+            "version": xray_version(&state.env),
             "error": null,
             "nodeInformation": {
-                "version": std::env::var("XRAY_CORE_VERSION").ok()
+                "version": env!("CARGO_PKG_VERSION")
             },
-            "system": {
-                "info": {
-                    "arch": std::env::consts::ARCH,
-                    "cpus": num_cpus::get(),
-                    "cpuModel": "",
-                    "memoryTotal": 0,
-                    "hostname": "",
-                    "platform": std::env::consts::OS,
-                    "release": "",
-                    "type": "",
-                    "version": "",
-                    "networkInterfaces": []
-                },
-                "stats": {
-                    "memoryFree": 0,
-                    "memoryUsed": 0,
-                    "uptime": 0,
-                    "loadAvg": [0.0, 0.0, 0.0],
-                    "interface": null
-                }
-            }
+            "system": system
         }
     }))
 }
 
 pub async fn stop(State(state): State<AppState>) -> Json<serde_json::Value> {
     tracing::info!("GET /node/xray/stop");
-    let mut xray = state.xray.write().await;
 
-    if let Some(ref mut child) = xray.process {
-        match crate::xray_process::stop_xray(child).await {
-            Ok(_) => {
-                tracing::info!("Xray stopped");
-                xray.process = None;
-                xray.handler_client = None;
-                xray.stats_client = None;
-                xray.router_client = None;
-                Json(serde_json::json!({"response": {"isStopped": true}}))
+    // Clear persisted state to match upstream behaviour: a manual stop means
+    // the node should not auto-start xray on next boot.
+    if let Err(e) = remnanode_config::persistence::PersistedNodeState::clear().await {
+        tracing::warn!("Failed to clear persisted state: {e}");
+    }
+
+    let mut xray = state.xray.write().await;
+    xray.stop_xray().await;
+    xray.config = None;
+    xray.xtls_config_inbounds.clear();
+    xray.inbound_users.clear();
+    xray.empty_config_hash = None;
+    xray.inbound_hashes.clear();
+
+    Json(serde_json::json!({"response": {"isStopped": true}}))
+}
+
+/// Attempt to start xray from a previously persisted panel config.
+/// Called once at startup so the node is self-healing across Pterodactyl restarts.
+pub async fn auto_start_from_persistence(state: AppState) -> Result<(), String> {
+    let persisted = match remnanode_config::persistence::PersistedNodeState::load().await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::info!("No persisted node state found; waiting for panel to start xray");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load persisted state: {e}");
+            return Err(e);
+        }
+    };
+
+    tracing::info!("Auto-starting xray from persisted state (saved at {})", persisted.saved_at);
+
+    ensure_hysteria_cert(&state.env, &persisted.panel_config).await;
+
+    let is_torrent_blocker_enabled = persisted
+        .torrent_blocker_state
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let torrent_include_tags: std::collections::HashSet<String> = persisted
+        .torrent_blocker_state
+        .get("includeRuleTags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let full_config = remnanode_config::xray_config::generate_api_config(
+        &persisted.panel_config,
+        state.env.xtls_api_port,
+        state.env.xray_proxy_port,
+        state.env.node_port,
+        &state.mtls_certs,
+        is_torrent_blocker_enabled,
+        &torrent_include_tags,
+        &state.internal.socket_path,
+        &state.internal.token,
+    );
+
+    {
+        let mut xray = state.xray.write().await;
+        xray.extract_users_from_config(&persisted.hashes, &full_config);
+        xray.config = Some(full_config);
+    }
+
+    remnanode_xray::XrayState::start_and_connect(
+        state.xray.clone(),
+        &state.internal.socket_path,
+        &state.internal.token,
+        state.env.xtls_api_port,
+        state.mtls_certs.clone(),
+    ).await
+}
+
+/// Daily background check for Hysteria certificate renewal. acme.sh itself
+/// decides whether a given cert is actually due (~30 days before the
+/// ~90-day Let's Encrypt expiry) — this just calls it once a day and, if the
+/// certificate file was actually rewritten, restarts xray so it picks up the
+/// new file (xray does not hot-reload TLS certificates from disk).
+pub fn spawn_hysteria_cert_renewal(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+        interval.tick().await; // first tick fires immediately; skip it
+
+        loop {
+            interval.tick().await;
+
+            let Some(cf_token) = state.env.cf_token.clone() else {
+                continue;
+            };
+
+            let persisted = match remnanode_config::persistence::PersistedNodeState::load().await {
+                Ok(Some(s)) => s,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!("Cert renewal: failed to load persisted state: {e}");
+                    continue;
+                }
+            };
+
+            if remnanode_config::acme::find_hysteria_domain(&persisted.panel_config).is_none() {
+                continue;
             }
-            Err(e) => {
-                tracing::error!("Failed to stop xray: {e}");
-                Json(serde_json::json!({"response": {"isStopped": false, "message": e}}))
+
+            match remnanode_config::acme::renew_if_due(&cf_token).await {
+                Ok(true) => {
+                    tracing::info!("Hysteria certificate renewed; restarting xray to pick it up");
+                    if let Err(e) = auto_start_from_persistence(state.clone()).await {
+                        tracing::error!("Failed to restart xray after cert renewal: {e}");
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("Hysteria certificate renewal check failed: {e}"),
             }
         }
-    } else {
-        Json(serde_json::json!({"response": {"isStopped": true}}))
-    }
+    })
 }
 
 pub async fn healthcheck(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -236,8 +362,8 @@ pub async fn healthcheck(State(state): State<AppState>) -> Json<serde_json::Valu
         "response": {
             "isAlive": true,
             "xrayInternalStatusCached": grpc_ok,
-            "xrayVersion": std::env::var("XRAY_CORE_VERSION").ok(),
-            "nodeVersion": "2.7.0"
+            "xrayVersion": xray_version(&state.env),
+            "nodeVersion": env!("CARGO_PKG_VERSION")
         }
     }))
 }

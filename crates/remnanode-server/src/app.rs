@@ -1,5 +1,4 @@
 use axum::{Router, routing::{get, post}, middleware};
-use axum::extract::FromRef;
 use crate::state::AppState;
 use crate::handlers;
 use crate::middleware::jwt_auth;

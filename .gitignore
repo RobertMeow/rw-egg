@@ -1,6 +1,9 @@
 # Rust
 target/
 
+# Local protoc toolchain (downloaded binary)
+.protoc/
+
 # Pre-built binary (rebuilt via Docker, uploaded via SFTP)
 deploy/remnanode-bin
 

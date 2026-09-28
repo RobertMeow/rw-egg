@@ -18,7 +18,7 @@ fn parse_body(body: &Bytes) -> serde_json::Value {
     }
     // Fallback
     let s = String::from_utf8_lossy(body);
-    if let Some(pos) = s.find(|c: char| c == '{' || c == '[') {
+    if let Some(pos) = s.find(['{', '[']) {
         if let Ok(v) = serde_json::from_str(&s[pos..]) {
             return v;
         }

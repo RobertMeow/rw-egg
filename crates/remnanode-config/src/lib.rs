@@ -1,4 +1,6 @@
+pub mod acme;
 pub mod certs;
+pub mod persistence;
 pub mod secret;
 pub mod xray_config;
 
@@ -13,7 +15,11 @@ pub struct EnvConfig {
     pub xray_proxy_port: u16,
     pub xray_core_version: String,
     pub disable_hashed_set_check: bool,
-    pub panel_ips: Vec<std::net::IpAddr>,
+    /// Cloudflare API token (DNS:Edit scope) used by acme.sh's `dns_cf`
+    /// plugin to complete DNS-01 challenges for Hysteria2's Let's Encrypt
+    /// certificate. Only required if the panel config contains a Hysteria
+    /// inbound.
+    pub cf_token: Option<String>,
 }
 
 impl EnvConfig {
@@ -46,11 +52,7 @@ impl EnvConfig {
             .parse()
             .unwrap_or(false);
 
-        let panel_ips: Vec<std::net::IpAddr> = std::env::var("PANEL_IPS")
-            .unwrap_or_else(|_| "".to_string())
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
+        let cf_token = std::env::var("CF_TOKEN").ok();
 
         Ok(Self {
             node_port,
@@ -60,7 +62,7 @@ impl EnvConfig {
             xray_proxy_port,
             xray_core_version,
             disable_hashed_set_check,
-            panel_ips,
+            cf_token,
         })
     }
 }
@@ -104,3 +106,46 @@ pub fn generate_internal_config() -> InternalConfig {
 
 pub use certs::{generate_mtls_certs, MtlsCerts};
 pub use secret::{parse_secret_key, SecretKey};
+
+/// Detect whether the current process has CAP_NET_ADMIN in its effective
+/// capability set. This mirrors the Node.js `sockdestroy` check used by the
+/// upstream Remnawave node.
+///
+/// Currently unused: the stats path no longer depends on `CAP_NET_ADMIN`
+/// (online detection is traffic-recency based via the accumulator, and
+/// `statsUserOnline` is forced off). Retained for future privilege-gated
+/// features such as nftables-based IP blocking.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn has_cap_net_admin() -> bool {
+    const CAP_NET_ADMIN: u64 = 12;
+
+    let contents = match std::fs::read_to_string("/proc/self/status") {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("CapEff:\t") {
+            return parse_cap_mask(value).map_or(false, |mask| (mask >> CAP_NET_ADMIN) & 1 == 1);
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cap_mask(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Kernel uses lowercase hex (e.g. 0000003fffffffff); allow uppercase too.
+    u64::from_str_radix(trimmed, 16).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+pub fn has_cap_net_admin() -> bool {
+    false
+}

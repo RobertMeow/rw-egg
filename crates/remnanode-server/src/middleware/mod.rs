@@ -7,7 +7,6 @@ use axum::{
     response::Response,
     body::Body,
 };
-use remnanode_config::SecretKey;
 use crate::state::AppState;
 
 pub async fn jwt_auth(

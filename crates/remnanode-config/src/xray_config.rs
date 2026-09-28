@@ -1,9 +1,11 @@
 use crate::MtlsCerts;
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate_api_config(
     panel_config: &serde_json::Value,
     xtls_api_port: u16,
     xray_proxy_port: u16,
+    node_port: u16,
     mtls: &MtlsCerts,
     torrent_blocker_enabled: bool,
     torrent_include_tags: &std::collections::HashSet<String>,
@@ -30,9 +32,44 @@ pub fn generate_api_config(
     let mut inbounds = vec![api_inbound];
     if let Some(existing) = config.get("inbounds").and_then(|v| v.as_array()) {
         for mut inbound in existing.clone() {
-            // Redirect non-API inbounds to internal proxy port for mux
             if let Some(obj) = inbound.as_object_mut() {
-                if obj.get("tag").and_then(|v| v.as_str()) != Some("REMNAWAVE_API_INBOUND") {
+                let is_api = obj.get("tag").and_then(|v| v.as_str()) == Some("REMNAWAVE_API_INBOUND");
+                let is_hysteria = obj.get("protocol").and_then(|v| v.as_str()) == Some("hysteria");
+
+                if is_api {
+                    // leave untouched
+                } else if is_hysteria {
+                    // Hysteria2 runs over QUIC/UDP, which the TCP-only SNI
+                    // multiplexer can't carry. It gets its own UDP socket on
+                    // the same port number as the public TCP mux — TCP and
+                    // UDP are independent socket namespaces, so there's no
+                    // conflict, and Pterodactyl allocations forward both
+                    // protocols for a single port number.
+                    obj.insert("listen".to_string(), serde_json::json!("0.0.0.0"));
+                    obj.insert("port".to_string(), serde_json::json!(node_port));
+
+                    // The panel's inbound template points at cert paths
+                    // (e.g. `/certs/fullchain.cer`) that don't exist in this
+                    // container. Always point at the fixed local path that
+                    // `acme::ensure_cert` issues into instead.
+                    let cert = crate::acme::cert_paths();
+                    if let Some(tls) = obj
+                        .get_mut("streamSettings")
+                        .and_then(|v| v.as_object_mut())
+                        .and_then(|s| s.get_mut("tlsSettings"))
+                        .and_then(|v| v.as_object_mut())
+                    {
+                        tls.insert(
+                            "certificates".to_string(),
+                            serde_json::json!([{
+                                "certificateFile": cert.cert_file.to_string_lossy(),
+                                "keyFile": cert.key_file.to_string_lossy(),
+                            }]),
+                        );
+                    }
+                } else {
+                    // Redirect all other non-API (TCP) inbounds to the
+                    // internal proxy port for the mux to forward to.
                     obj.insert("listen".to_string(), serde_json::json!("127.0.0.1"));
                     obj.insert("port".to_string(), serde_json::json!(xray_proxy_port));
                 }
@@ -47,13 +84,21 @@ pub fn generate_api_config(
         config["outbounds"] = serde_json::json!([]);
     }
 
-    // Build policy
+    // Build policy.
+    //
+    // `statsUserOnline` is forced off: xray's `>>>online` stat needs kernel
+    // connection tracking (CAP_NET_ADMIN) which a non-root Pterodactyl container
+    // lacks, and the node-side traffic accumulator now derives online status from
+    // traffic recency. Keeping it off also means the `"user>>>"` QueryStats
+    // pattern matches only `traffic>>>uplink|downlink` counters, so the
+    // accumulator's reset:true polls own exactly those counters with no
+    // interference. Per-user uplink/downlink remain unconditionally enabled.
     config["policy"] = serde_json::json!({
         "levels": {
             "0": {
                 "statsUserUplink": true,
                 "statsUserDownlink": true,
-                "statsUserOnline": false  // no CAP_NET_ADMIN
+                "statsUserOnline": false
             }
         },
         "system": {
@@ -131,25 +176,11 @@ pub fn generate_api_config(
     config
 }
 
-fn build_api_inbound(port: u16, mtls: &MtlsCerts) -> serde_json::Value {
-    let server_cert_lines: Vec<String> = mtls.server_cert_pem
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-
-    let server_key_lines: Vec<String> = mtls.server_key_pem
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-
-    let ca_cert_lines: Vec<String> = mtls.ca_cert_pem
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
-
+fn build_api_inbound(port: u16, _mtls: &MtlsCerts) -> serde_json::Value {
+    // Use a plaintext (no TLS) API inbound. The API port is bound to
+    // 127.0.0.1 and is only reachable from the node process itself, so TLS
+    // is unnecessary and avoids compatibility issues between tonic/rustls and
+    // Xray-core's mTLS API inbound on some setups.
     serde_json::json!({
         "tag": "REMNAWAVE_API_INBOUND",
         "port": port,
@@ -157,25 +188,6 @@ fn build_api_inbound(port: u16, mtls: &MtlsCerts) -> serde_json::Value {
         "protocol": "dokodemo-door",
         "settings": {
             "address": "127.0.0.1"
-        },
-        "streamSettings": {
-            "security": "tls",
-            "tlsSettings": {
-                "alpn": ["h2"],
-                "serverName": "internal.remnawave.local",
-                "disableSystemRoot": true,
-                "rejectUnknownSni": true,
-                "certificates": [
-                    {
-                        "certificate": server_cert_lines,
-                        "key": server_key_lines
-                    },
-                    {
-                        "usage": "verify",
-                        "certificate": ca_cert_lines
-                    }
-                ]
-            }
         }
     })
 }

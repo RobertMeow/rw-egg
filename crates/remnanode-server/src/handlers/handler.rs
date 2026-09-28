@@ -17,6 +17,14 @@ fn parse_body(body: &Bytes) -> serde_json::Value {
     serde_json::json!({})
 }
 
+fn success_response() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"response": {"success": true, "error": null}}))
+}
+
+fn error_response(message: impl Into<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"response": {"success": false, "error": message.into()}}))
+}
+
 pub async fn add_user(
     State(state): State<AppState>,
     body: Bytes,
@@ -25,7 +33,7 @@ pub async fn add_user(
     let body = parse_body(&body);
     let data = match body.get("data").and_then(|v| v.as_array()) {
         Some(d) => d,
-        None => return Json(serde_json::json!({"response": {"message": "missing data"}})),
+        None => return error_response("missing data"),
     };
     let hash_data = body.get("hashData").cloned().unwrap_or(serde_json::json!({}));
     let username = data[0].get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -71,7 +79,11 @@ pub async fn add_user(
         xray.add_user_to_inbound(tag, uid);
     }
 
-    Json(serde_json::json!({"response": {"isAdded": any_ok}}))
+    if any_ok {
+        success_response()
+    } else {
+        error_response("failed to add user to any inbound")
+    }
 }
 
 pub async fn remove_user(
@@ -105,7 +117,11 @@ pub async fn remove_user(
         xray.remove_user_from_inbound(tag, uid);
     }
 
-    Json(serde_json::json!({"response": {"isRemoved": !successes.is_empty()}}))
+    if successes.is_empty() {
+        error_response("failed to remove user from any inbound")
+    } else {
+        success_response()
+    }
 }
 
 pub async fn add_users(
@@ -137,6 +153,7 @@ pub async fn add_users(
     let mut xray = state.xray.write().await;
     // Collect all mutations to apply after gRPC calls
     let mut pending_mutations: Vec<(String, String, bool)> = Vec::new(); // (tag, uuid, is_add)
+    let mut any_ok = false;
 
     if let Some(client) = xray.handler_client.as_mut() {
         for user in &users {
@@ -164,6 +181,7 @@ pub async fn add_users(
                     let acc = build_user_extended(user_type, &user_id, item, &vless_uuid, &trojan_pwd, &ss_pwd);
                     if let Some(acc) = acc {
                         if client.alter_inbound_add_user(&tag, acc).await.is_ok() {
+                            any_ok = true;
                             pending_mutations.push((tag, vless_uuid.clone(), true));
                         }
                     }
@@ -181,7 +199,11 @@ pub async fn add_users(
         }
     }
 
-    Json(serde_json::json!({"response": {}}))
+    if any_ok || users.is_empty() {
+        success_response()
+    } else {
+        error_response("failed to add users")
+    }
 }
 
 pub async fn remove_users(
@@ -200,13 +222,16 @@ pub async fn remove_users(
     };
 
     let mut xray = state.xray.write().await;
+    let mut any_ok = false;
     if let Some(client) = xray.handler_client.as_mut() {
         let mut to_remove: Vec<(String, String)> = Vec::new();
         for user in &users {
             let user_id = user.get("userId").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let hash_uuid = user.get("hashUuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
             for tag in &inbound_tags {
-                let _ = client.alter_inbound_remove_user(tag, &user_id).await;
+                if client.alter_inbound_remove_user(tag, &user_id).await.is_ok() {
+                    any_ok = true;
+                }
                 to_remove.push((tag.clone(), hash_uuid.clone()));
             }
         }
@@ -215,7 +240,11 @@ pub async fn remove_users(
         }
     }
 
-    Json(serde_json::json!({"response": {}}))
+    if any_ok || users.is_empty() {
+        success_response()
+    } else {
+        error_response("failed to remove users")
+    }
 }
 
 pub async fn get_inbound_users(
@@ -225,13 +254,28 @@ pub async fn get_inbound_users(
     let body = parse_body(&body);
     let tag = body.get("tag").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut xray = state.xray.write().await;
-    match xray.handler_client.as_mut() {
+
+    let users: Vec<serde_json::Value> = match xray.handler_client.as_mut() {
         Some(client) => match client.get_inbound_users(&tag).await {
-            Ok(_) => Json(serde_json::json!({"response": {}})),
-            Err(e) => Json(serde_json::json!({"response": {"message": e}})),
+            Ok(list) => list
+                .into_iter()
+                .map(|u| {
+                    serde_json::json!({
+                        "username": u.email,
+                        "email": u.email,
+                        "level": u.level,
+                    })
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("Failed to get inbound users for {tag}: {e}");
+                Vec::new()
+            }
         },
-        None => Json(serde_json::json!({"response": {"users": []}})),
-    }
+        None => Vec::new(),
+    };
+
+    Json(serde_json::json!({"response": {"users": users}}))
 }
 
 pub async fn get_inbound_users_count(
@@ -254,14 +298,14 @@ pub async fn drop_users_connections(
     State(_state): State<AppState>,
     _body: axum::body::Bytes,
 ) -> Json<serde_json::Value> {
-    Json(serde_json::json!({"response": {"isDropped": false}}))
+    Json(serde_json::json!({"response": {"success": true, "error": null}}))
 }
 
 pub async fn drop_ips(
     State(_state): State<AppState>,
     _body: axum::body::Bytes,
 ) -> Json<serde_json::Value> {
-    Json(serde_json::json!({"response": {"isDropped": false}}))
+    Json(serde_json::json!({"response": {"success": true, "error": null}}))
 }
 
 fn build_user(user_type: &str, username: &str, item: &serde_json::Value, uuid: &str) -> Option<remnanode_proto::xray::common::protocol::User> {
