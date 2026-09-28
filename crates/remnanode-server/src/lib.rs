@@ -2,6 +2,7 @@ pub mod app;
 pub mod handlers;
 pub mod middleware;
 pub mod state;
+pub mod supervisor;
 
 pub use app::build_router;
 pub use state::AppState;

@@ -19,7 +19,11 @@ pub async fn start_xray(
 
     tracing::info!("Starting xray with config from {config_url}");
 
+    let gomemlimit = xray_memory_limit();
+    tracing::info!("xray GOMEMLIMIT={gomemlimit}");
+
     let mut child = Command::new(XRAY_PATH)
+        .env("GOMEMLIMIT", &gomemlimit)
         .arg("-config")
         .arg(&config_url)
         .arg("-format")
@@ -52,6 +56,40 @@ pub async fn start_xray(
     }
 
     Ok(child)
+}
+
+/// Мягкий лимит памяти Go-рантайма xray: XRAY_GOMEMLIMIT или 60% лимита контейнера.
+/// Без него GC xray не знает о лимите cgroup и под нагрузкой выедает всю память.
+fn xray_memory_limit() -> String {
+    if let Ok(v) = std::env::var("XRAY_GOMEMLIMIT") {
+        return v;
+    }
+    let limit = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|s| s.trim().parse::<u64>().ok())
+        .find(|&v| v > 0 && v < (1 << 50));
+    match limit {
+        Some(bytes) => format!("{}MiB", bytes * 6 / 10 / (1024 * 1024)),
+        None => "off".to_string(),
+    }
+}
+
+/// Сводка memory.stat cgroup (anon/file/sock/kernel) — для диагностики падений.
+pub fn memory_breakdown() -> String {
+    let stat = std::fs::read_to_string("/sys/fs/cgroup/memory.stat").unwrap_or_default();
+    let current = std::fs::read_to_string("/sys/fs/cgroup/memory.current").unwrap_or_default();
+    let mb = |v: &str| v.trim().parse::<u64>().map(|b| b / (1024 * 1024)).unwrap_or(0);
+    let mut parts = vec![format!("current={}MiB", mb(&current))];
+    for line in stat.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(k), Some(v)) = (it.next(), it.next()) {
+            if matches!(k, "anon" | "file" | "sock" | "kernel" | "kernel_stack" | "shmem") {
+                parts.push(format!("{k}={}MiB", mb(v)));
+            }
+        }
+    }
+    parts.join(" ")
 }
 
 pub async fn stop_xray(child: &mut tokio::process::Child) -> Result<(), String> {

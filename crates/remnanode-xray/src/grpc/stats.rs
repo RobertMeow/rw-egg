@@ -17,7 +17,7 @@ impl StatsClient {
             .identity(Identity::from_pem(client_cert, client_key))
             .domain_name("internal.remnawave.local");
 
-        let channel = Channel::from_shared(format!("http://{addr}"))?
+        let channel = Channel::from_shared(format!("https://{addr}"))?
             .tls_config(tls)?
             .connect()
             .await?;
@@ -88,28 +88,27 @@ impl StatsClient {
         }
     }
 
-    pub async fn get_online_ip_list(&mut self, name: &str, reset: bool) -> Result<serde_json::Value, String> {
+    /// IP-адреса онлайн-юзера: [(ip, lastSeen unix sec)].
+    pub async fn get_online_ip_list(&mut self, name: &str, reset: bool) -> Result<Vec<(String, i64)>, String> {
         use remnanode_proto::xray::app::stats::command::GetStatsRequest;
         let request = GetStatsRequest {
             name: name.to_string(),
             reset,
         };
         match self.inner.get_stats_online_ip_list(request).await {
-            Ok(response) => {
-                let result = response.into_inner();
-                let ips: serde_json::Map<String, serde_json::Value> = result.ips
-                    .into_keys()
-                    .map(|k| (k, serde_json::Value::Bool(true)))
-                    .collect();
-                Ok(serde_json::json!({"ips": serde_json::Value::Object(ips)}))
-            }
-            Err(e) => {
-                if e.code() == tonic::Code::NotFound {
-                    Ok(serde_json::json!({"ips": {}}))
-                } else {
-                    Err(e.to_string())
-                }
-            }
+            Ok(response) => Ok(response.into_inner().ips.into_iter().collect()),
+            Err(e) if e.code() == tonic::Code::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Имена счётчиков онлайн-юзеров вида `user>>>ID>>>online`.
+    pub async fn get_all_online_users(&mut self) -> Result<Vec<String>, String> {
+        use remnanode_proto::xray::app::stats::command::GetAllOnlineUsersRequest;
+        self.inner
+            .get_all_online_users(GetAllOnlineUsersRequest {})
+            .await
+            .map(|r| r.into_inner().users)
+            .map_err(|e| e.to_string())
     }
 }

@@ -26,7 +26,7 @@ impl HandlerClient {
             .identity(Identity::from_pem(client_cert, client_key))
             .domain_name("internal.remnawave.local");
 
-        let channel = Channel::from_shared(format!("http://{addr}"))?
+        let channel = Channel::from_shared(format!("https://{addr}"))?
             .tls_config(tls)?
             .connect()
             .await?;

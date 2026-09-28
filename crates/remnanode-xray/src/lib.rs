@@ -16,6 +16,11 @@ pub struct XrayState {
     pub router_client: Option<grpc::router::RouterClient>,
     pub mtls_certs: Option<Arc<remnanode_config::MtlsCerts>>,
     pub xtls_api_port: u16,
+    /// Изменения юзеров (путь, тело) после последнего старта от панели — для
+    /// восстановления после самостоятельного перезапуска упавшего xray.
+    pub journal: Vec<(String, Vec<u8>)>,
+    /// Журнал переполнен: после падения часть юзеров не восстановится.
+    pub journal_overflow: bool,
 }
 
 impl Default for XrayState {
@@ -30,6 +35,8 @@ impl Default for XrayState {
             router_client: None,
             mtls_certs: None,
             xtls_api_port: 61000,
+            journal: Vec::new(),
+            journal_overflow: false,
         }
     }
 }
@@ -59,6 +66,15 @@ impl XrayState {
 
         self.xtls_api_port = xtls_api_port;
         Ok(())
+    }
+
+    pub fn record_journal(&mut self, path: &str, body: &[u8]) {
+        const MAX_JOURNAL: usize = 5000;
+        if self.journal.len() >= MAX_JOURNAL {
+            self.journal_overflow = true;
+            return;
+        }
+        self.journal.push((path.to_string(), body.to_vec()));
     }
 
     pub fn add_xtls_config_inbound(&mut self, tag: String) {

@@ -53,6 +53,9 @@ async fn main() {
         mtls_certs,
     );
 
+    // Сторож xray: перезапуск после самопроизвольного падения
+    remnanode_server::supervisor::spawn(state.clone());
+
     // Build the axum router
     let app = remnanode_server::build_router(state.clone());
 

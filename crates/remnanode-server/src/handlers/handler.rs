@@ -21,6 +21,14 @@ pub async fn add_user(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Json<serde_json::Value> {
+    state.xray.write().await.record_journal("add_user", &body);
+    add_user_inner(state, body).await
+}
+
+pub async fn add_user_inner(
+    state: AppState,
+    body: Bytes,
+) -> Json<serde_json::Value> {
     tracing::info!("POST /node/handler/add-user");
     let body = parse_body(&body);
     let data = match body.get("data").and_then(|v| v.as_array()) {
@@ -78,6 +86,14 @@ pub async fn remove_user(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Json<serde_json::Value> {
+    state.xray.write().await.record_journal("remove_user", &body);
+    remove_user_inner(state, body).await
+}
+
+pub async fn remove_user_inner(
+    state: AppState,
+    body: Bytes,
+) -> Json<serde_json::Value> {
     tracing::info!("POST /node/handler/remove-user");
     let body = parse_body(&body);
     let username = body.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -110,6 +126,14 @@ pub async fn remove_user(
 
 pub async fn add_users(
     State(state): State<AppState>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    state.xray.write().await.record_journal("add_users", &body);
+    add_users_inner(state, body).await
+}
+
+pub async fn add_users_inner(
+    state: AppState,
     body: Bytes,
 ) -> Json<serde_json::Value> {
     let body = parse_body(&body);
@@ -186,6 +210,14 @@ pub async fn add_users(
 
 pub async fn remove_users(
     State(state): State<AppState>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    state.xray.write().await.record_journal("remove_users", &body);
+    remove_users_inner(state, body).await
+}
+
+pub async fn remove_users_inner(
+    state: AppState,
     body: Bytes,
 ) -> Json<serde_json::Value> {
     let body = parse_body(&body);
